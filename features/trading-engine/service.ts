@@ -1,4 +1,4 @@
-import { createClient } from "@/supabase/client";
+import { createClient } from "../../lib/supabase/client";
 import { PlaceOrderInput } from "@/lib/types/order-schames";
 import { HistoricalCandle, Order } from "../../lib/types/database";
 import { evaluateOrderAgainstCandle } from "./matching";
@@ -6,9 +6,6 @@ import { evaluateOrderAgainstCandle } from "./matching";
 export class TradingService {
   private supabase = createClient();
 
-  /**
-   * Places an order and locks the required margin atomically
-   */
   async placeOrder(
     userId: string,
     input: PlaceOrderInput,
@@ -19,6 +16,7 @@ export class TradingService {
       {
         p_user_id: userId,
         p_symbol: input.symbol,
+        p_side: "BUY",
         p_order_type: input.orderType,
         p_product_type: input.productType,
         p_quantity: input.quantity,
@@ -30,11 +28,8 @@ export class TradingService {
       },
     );
 
-    if (error) {
-      throw new Error(`Order placement failed: ${error.message}`);
-    }
+    if (error) throw new Error(error.message);
 
-    // If MARKET order, execute fill immediately at current price
     if (input.orderType === "MARKET") {
       await this.executeFill(orderId, currentMarketPrice, input.virtualTime);
     }
@@ -42,9 +37,28 @@ export class TradingService {
     return orderId as string;
   }
 
-  /**
-   * Executes fill via Postgres atomic stored procedure
-   */
+  async squareOff(
+    userId: string,
+    symbol: string,
+    productType: "MIS" | "CNC",
+    exitPrice: number,
+    exitTime: string,
+  ) {
+    const { data: orderId, error } = await this.supabase.rpc(
+      "square_off_position",
+      {
+        p_user_id: userId,
+        p_symbol: symbol,
+        p_product_type: productType,
+        p_exit_price: exitPrice,
+        p_exit_time: exitTime,
+      },
+    );
+
+    if (error) throw new Error(error.message);
+    return orderId as string;
+  }
+
   async executeFill(orderId: string, fillPrice: number, fillTime: string) {
     const { error } = await this.supabase.rpc("execute_order_fill", {
       p_order_id: orderId,
@@ -52,20 +66,13 @@ export class TradingService {
       p_fill_time: fillTime,
     });
 
-    if (error) {
-      throw new Error(`Fill execution failed: ${error.message}`);
-    }
+    if (error) throw new Error(error.message);
   }
 
-  /**
-   * Reconciles all pending orders across elapsed historical candles
-   * (Crucial for offline / closed-tab simulation resumption)
-   */
   async reconcilePendingOrders(
     userId: string,
     elapsedCandles: HistoricalCandle[],
   ) {
-    // 1. Fetch user's pending orders
     const { data: orders, error } = await this.supabase
       .from("orders")
       .select("*")
@@ -74,11 +81,9 @@ export class TradingService {
 
     if (error || !orders || orders.length === 0) return;
 
-    // 2. Iterate chronologically through candles and evaluate matching
     for (const candle of elapsedCandles) {
       for (const order of orders as Order[]) {
         if (order.status === "FILLED") continue;
-
         const match = evaluateOrderAgainstCandle(order, candle);
         if (match) {
           await this.executeFill(
@@ -86,7 +91,7 @@ export class TradingService {
             match.fillPrice,
             match.fillTime,
           );
-          order.status = "FILLED"; // Mark locally to prevent double execution in loop
+          order.status = "FILLED";
         }
       }
     }

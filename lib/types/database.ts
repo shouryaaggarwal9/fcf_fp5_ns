@@ -1,5 +1,6 @@
 export type OrderType = "MARKET" | "LIMIT" | "STOP_LIMIT";
 export type ProductType = "CNC" | "MIS"; // CNC = Delivery (100% margin), MIS = Intraday (leverage/auto-square-off)
+
 export type OrderStatus =
   | "PENDING"
   | "TRIGGER_PENDING"
@@ -36,13 +37,14 @@ export interface Order {
   symbol: string;
   order_type: OrderType;
   product_type: ProductType;
+  side: "BUY" | "SELL";
   quantity: number;
   limit_price: number | null;
   trigger_price: number | null;
   stop_loss_price: number | null;
   status: OrderStatus;
   filled_price: number | null;
-  filled_quantity: number;
+  filled_quantity: number | null;
   filled_at: string | null;
   placed_at_virtual_time: string;
   created_at: string;
@@ -69,6 +71,7 @@ export interface Position {
   product_type: ProductType;
   quantity: number;
   average_buy_price: number;
+  realized_pnl: number;
   created_at: string;
   updated_at: string;
 }

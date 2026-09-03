@@ -1,7 +1,9 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
-import { createClient } from "@/supabase/client";
+import React, { useState, useEffect, useCallback, useRef } from "react";
+import { useRouter } from "next/navigation";
+import { LogOut } from "lucide-react";
+import { createClient } from "../lib/supabase/client";
 import {
   HistoricalCandle,
   Order,
@@ -21,49 +23,61 @@ import { VirtualClock } from "../features/market-data/VirtualClock";
 import { tradingService } from "../features/trading-engine/service";
 
 export default function TradingTerminalPage() {
+  const router = useRouter();
   const supabase = createClient();
 
-  // Selected Stock & Timeframe state
   const [selectedSymbol, setSelectedSymbol] = useState<string>("RELIANCE");
   const [timeframe, setTimeframe] = useState<TimeFrame>("5m");
 
-  // Simulation Clock state
+  // Aligned to 09:15:00 AM IST (03:45:00 UTC)
   const [virtualTime, setVirtualTime] = useState<string>(
-    "2024-01-01T09:45:00.000Z",
+    "2024-01-01T03:45:00.000Z",
   );
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [playbackSpeed, setPlaybackSpeed] = useState<number>(1);
 
-  // Market & Financial Data State
+  // Active Candle Intra-bar Tick State
+  const [activeBar, setActiveBar] = useState<{
+    timestamp: string;
+    open: number;
+    high: number;
+    low: number;
+    close: number;
+    volume: number;
+  } | null>(null);
+
   const [candles, setCandles] = useState<HistoricalCandle[]>([]);
   const [quotes, setQuotes] = useState<Record<string, StockQuote>>({});
   const [wallet, setWallet] = useState<Wallet | null>(null);
   const [positions, setPositions] = useState<Position[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
   const [userId, setUserId] = useState<string>("");
-  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [userEmail, setUserEmail] = useState<string>("");
 
-  // 1. Authenticate or Setup Demo User Session
+  const virtualTimeRef = useRef(virtualTime);
+  virtualTimeRef.current = virtualTime;
+
+  // 1. Session check
   useEffect(() => {
-    async function initUser() {
+    async function loadUser() {
       const {
         data: { user },
+        error,
       } = await supabase.auth.getUser();
 
-      if (user) {
-        setUserId(user.id);
-      } else {
-        // Sign in anonymously or with fallback demo credentials for the simulator
-        const { data: anonData } = await supabase.auth.signInAnonymously();
-        if (anonData?.user) {
-          setUserId(anonData.user.id);
-        }
+      if (error || !user) {
+        router.push("/login");
+        return;
       }
-    }
-    initUser();
-  }, [supabase]);
 
-  // 2. Fetch User Financial Ledger (Wallet, Positions, Orders)
+      setUserId(user.id);
+      setUserEmail(user.email || "Trader");
+    }
+
+    loadUser();
+  }, [supabase, router]);
+
+  // 2. Fetch User Financial Ledger
   const fetchUserData = useCallback(async () => {
     if (!userId) return;
 
@@ -77,27 +91,12 @@ export default function TradingTerminalPage() {
         .order("created_at", { ascending: false }),
     ]);
 
-    if (walletRes.data) {
-      setWallet(walletRes.data as Wallet);
-    } else {
-      // Create default wallet if newly registered
-      const { data: newWallet } = await supabase
-        .from("wallets")
-        .insert({
-          user_id: userId,
-          cash_balance: 1000000.0,
-          locked_margin: 0.0,
-        })
-        .select()
-        .single();
-      if (newWallet) setWallet(newWallet as Wallet);
-    }
-
+    if (walletRes.data) setWallet(walletRes.data as Wallet);
     if (positionsRes.data) setPositions(positionsRes.data as Position[]);
     if (ordersRes.data) setOrders(ordersRes.data as Order[]);
   }, [userId, supabase]);
 
-  // 3. Load Historical Candles for Active Symbol up to Virtual Time
+  // 3. Load historical candles
   const fetchCandles = useCallback(async () => {
     const { data, error } = await supabase
       .from("historical_candles")
@@ -108,12 +107,21 @@ export default function TradingTerminalPage() {
       .order("timestamp", { ascending: true })
       .limit(100);
 
-    if (!error && data) {
+    if (!error && data && data.length > 0) {
       setCandles(data as HistoricalCandle[]);
+      const last = data[data.length - 1];
+      setActiveBar({
+        timestamp: last.timestamp,
+        open: Number(last.open),
+        high: Number(last.high),
+        low: Number(last.low),
+        close: Number(last.close),
+        volume: Number(last.volume),
+      });
     }
   }, [selectedSymbol, timeframe, virtualTime, supabase]);
 
-  // 4. Compute Live Watchlist Quotes across all 10 symbols
+  // 4. Load Quotes
   const fetchQuotes = useCallback(async () => {
     const newQuotes: Record<string, StockQuote> = {};
 
@@ -154,30 +162,83 @@ export default function TradingTerminalPage() {
     setQuotes(newQuotes);
   }, [virtualTime, supabase]);
 
-  // Initial Data Load
   useEffect(() => {
-    async function loadInitial() {
-      setIsLoading(true);
-      await Promise.all([fetchCandles(), fetchQuotes(), fetchUserData()]);
-      setIsLoading(false);
-    }
-    loadInitial();
-  }, [fetchCandles, fetchQuotes, fetchUserData]);
+    fetchCandles();
+    fetchQuotes();
+  }, [fetchCandles, fetchQuotes]);
 
-  // 5. Advance Simulation Virtual Time (+5 minutes step) & Reconcile Orders
-  const stepForward = useCallback(async () => {
+  useEffect(() => {
+    if (userId) {
+      fetchUserData();
+    }
+  }, [userId, fetchUserData]);
+
+  // 5. Second-by-Second Tick Engine (When Playing)
+  useEffect(() => {
+    if (!isPlaying) return;
+
+    const interval = setInterval(async () => {
+      const currentMs = new Date(virtualTimeRef.current).getTime();
+      // Step virtual clock forward by (1 second * playbackSpeed)
+      const nextDate = new Date(currentMs + 1000 * playbackSpeed);
+      const nextIso = nextDate.toISOString();
+      setVirtualTime(nextIso);
+
+      // Micro-tick price motion
+      setActiveBar((prev) => {
+        if (!prev) return null;
+        const delta = (Math.random() - 0.49) * 0.75;
+        const newClose = Math.round((prev.close + delta) * 100) / 100;
+        const newHigh = Math.max(prev.high, newClose);
+        const newLow = Math.min(prev.low, newClose);
+        const newVol = prev.volume + Math.floor(Math.random() * 15);
+
+        // Check active limit order triggers on tick
+        if (userId) {
+          const tickSyntheticCandle: HistoricalCandle = {
+            id: 0,
+            symbol: selectedSymbol,
+            timeframe: "5m",
+            timestamp: prev.timestamp,
+            open: prev.open,
+            high: newHigh,
+            low: newLow,
+            close: newClose,
+            volume: newVol,
+          };
+          tradingService
+            .reconcilePendingOrders(userId, [tickSyntheticCandle])
+            .then(() => {
+              fetchUserData();
+            });
+        }
+
+        return {
+          ...prev,
+          high: newHigh,
+          low: newLow,
+          close: newClose,
+          volume: newVol,
+        };
+      });
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [isPlaying, playbackSpeed, selectedSymbol, userId, fetchUserData]);
+
+  // Step 5 minutes manually (+5m button)
+  const stepForward5m = useCallback(async () => {
     const nextDate = new Date(new Date(virtualTime).getTime() + 5 * 60 * 1000);
     const nextTimeIso = nextDate.toISOString();
     setVirtualTime(nextTimeIso);
 
-    // Fetch newly reached candles for matching engine check
     const { data: newCandles } = await supabase
       .from("historical_candles")
       .select("*")
       .eq("timeframe", "5m")
       .eq("timestamp", nextTimeIso);
 
-    if (newCandles && newCandles.length > 0 && userId) {
+    if (userId && newCandles && newCandles.length > 0) {
       await tradingService.reconcilePendingOrders(
         userId,
         newCandles as HistoricalCandle[],
@@ -186,15 +247,22 @@ export default function TradingTerminalPage() {
     }
   }, [virtualTime, userId, supabase, fetchUserData]);
 
-  // Current market price of selected symbol
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
+    router.push("/login");
+    router.refresh();
+  };
+
   const activeQuote = quotes[selectedSymbol];
   const currentPrice =
-    activeQuote?.currentPrice ?? NSE_STOCKS[selectedSymbol]?.basePrice ?? 1000;
+    activeBar?.close ??
+    activeQuote?.currentPrice ??
+    NSE_STOCKS[selectedSymbol]?.basePrice ??
+    1000;
 
   return (
     <div className="flex flex-col min-h-screen bg-[#0b0e14] text-slate-100 font-sans">
-      {/* Top Navbar */}
-      <header className="flex items-center justify-between px-6 py-3 border-b border-[#21262d] bg-[#161b22]">
+      <header className="flex flex-wrap items-center justify-between gap-4 px-6 py-3 border-b border-[#21262d] bg-[#161b22]">
         <div className="flex items-center gap-3">
           <div className="w-7 h-7 rounded bg-emerald-600 flex items-center justify-center font-black text-white text-sm">
             N
@@ -209,23 +277,40 @@ export default function TradingTerminalPage() {
           </div>
         </div>
 
-        {/* Global Virtual Clock */}
         <div className="w-auto">
           <VirtualClock
             currentVirtualTime={virtualTime}
             isPlaying={isPlaying}
             playbackSpeed={playbackSpeed}
             onTogglePlay={() => setIsPlaying(!isPlaying)}
-            onStepForward={stepForward}
+            onStepForward={stepForward5m}
             onSpeedChange={(speed) => setPlaybackSpeed(speed)}
           />
         </div>
+
+        <div className="flex items-center gap-3">
+          <div className="hidden sm:flex flex-col text-right">
+            <span className="text-xs font-semibold text-slate-200">
+              {userEmail}
+            </span>
+            <span className="text-[10px] font-mono text-emerald-400">
+              Authenticated Trader
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={handleSignOut}
+            title="Sign Out"
+            className="flex items-center gap-1 px-3 py-1.5 rounded border border-[#30363d] bg-[#0d1117] hover:bg-[#21262d] text-slate-300 hover:text-white text-xs font-medium transition"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Sign Out</span>
+          </button>
+        </div>
       </header>
 
-      {/* Main Terminal Workspace Layout */}
-      <main className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-3 p-3 max-w-400 mx-auto w-full">
-        {/* Left Column: 10 NSE Stocks Watchlist (3 cols) */}
-        <section className="lg:col-span-3 h-175">
+      <main className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-3 p-3 max-w-400 mx-auto w-full items-start">
+        <section className="lg:col-span-3 h-200">
           <Watchlist
             selectedSymbol={selectedSymbol}
             onSelectSymbol={(sym) => setSelectedSymbol(sym)}
@@ -233,11 +318,11 @@ export default function TradingTerminalPage() {
           />
         </section>
 
-        {/* Center Column: Interactive Chart + Portfolio / Orders (6 cols) */}
         <section className="lg:col-span-6 flex flex-col gap-3">
           <div className="h-130">
             <TradingChart
               candles={candles}
+              currentTick={activeBar}
               symbol={selectedSymbol}
               timeframe={timeframe}
               onTimeframeChange={(tf) => setTimeframe(tf)}
@@ -254,7 +339,6 @@ export default function TradingTerminalPage() {
           </div>
         </section>
 
-        {/* Right Column: Order Entry Desk (3 cols) */}
         <section className="lg:col-span-3">
           <OrderForm
             symbol={selectedSymbol}

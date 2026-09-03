@@ -218,22 +218,41 @@ export const OrderForm: React.FC<OrderFormProps> = ({
           />
         </div>
 
-        {/* Margin Audit Breakdown */}
+        {/* Margin Audit Breakdown with Leverage Transparency */}
         <div className="flex flex-col gap-1.5 p-3 rounded bg-[#0d1117] border border-[#21262d] text-xs">
-          <div className="flex justify-between">
-            <span className="text-slate-400">Required Margin:</span>
-            <span className="font-mono font-semibold text-white">
-              ₹{estimatedMargin.toFixed(2)}
+          <div className="flex justify-between text-slate-400">
+            <span>Total Contract Value:</span>
+            <span className="font-mono text-slate-300">
+              ₹
+              {(benchmarkPrice * quantity).toLocaleString("en-IN", {
+                minimumFractionDigits: 2,
+              })}
             </span>
           </div>
           <div className="flex justify-between">
+            <span className="text-slate-400">
+              Margin Required (
+              {productType === "MIS" ? "20% with 5x leverage" : "100% Delivery"}
+              ):
+            </span>
+            <span className="font-mono font-semibold text-white">
+              ₹
+              {estimatedMargin.toLocaleString("en-IN", {
+                minimumFractionDigits: 2,
+              })}
+            </span>
+          </div>
+          <div className="flex justify-between border-t border-[#21262d] pt-1.5">
             <span className="text-slate-400">Available Cash:</span>
             <span
               className={`font-mono font-semibold ${
                 hasSufficientFunds ? "text-emerald-400" : "text-rose-400"
               }`}
             >
-              ₹{availableCash.toFixed(2)}
+              ₹
+              {availableCash.toLocaleString("en-IN", {
+                minimumFractionDigits: 2,
+              })}
             </span>
           </div>
         </div>
