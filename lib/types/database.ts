@@ -42,6 +42,7 @@ export interface Order {
   limit_price: number | null;
   trigger_price: number | null;
   stop_loss_price: number | null;
+  target_price?: number | null;
   status: OrderStatus;
   filled_price: number | null;
   filled_quantity: number | null;

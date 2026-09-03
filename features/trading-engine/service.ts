@@ -16,13 +16,14 @@ export class TradingService {
       {
         p_user_id: userId,
         p_symbol: input.symbol,
-        p_side: "BUY",
+        p_side: input.side,
         p_order_type: input.orderType,
         p_product_type: input.productType,
         p_quantity: input.quantity,
         p_limit_price: input.limitPrice ?? null,
         p_trigger_price: input.triggerPrice ?? null,
         p_stop_loss_price: input.stopLossPrice ?? null,
+        p_target_price: input.targetPrice ?? null,
         p_virtual_time: input.virtualTime,
         p_estimated_price: currentMarketPrice,
       },
@@ -30,11 +31,21 @@ export class TradingService {
 
     if (error) throw new Error(error.message);
 
+    // If MARKET order, fill immediately.
+    // The DB execute_order_fill procedure automatically inserts target and SL orders atomically.
     if (input.orderType === "MARKET") {
       await this.executeFill(orderId, currentMarketPrice, input.virtualTime);
     }
 
     return orderId as string;
+  }
+
+  async cancelOrder(userId: string, orderId: string) {
+    const { error } = await this.supabase.rpc("cancel_pending_order", {
+      p_order_id: orderId,
+      p_user_id: userId,
+    });
+    if (error) throw new Error(error.message);
   }
 
   async squareOff(

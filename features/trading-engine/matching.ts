@@ -16,8 +16,7 @@ export interface GttTriggerResult {
 }
 
 /**
- * Checks if an open buy order (LIMIT, STOP_LIMIT, or order with Stop Loss)
- * conditions were satisfied by a candle.
+ * Checks whether an open order's price conditions were satisfied by a candle.
  */
 export function evaluateOrderAgainstCandle(
   order: Order,
@@ -39,8 +38,15 @@ export function evaluateOrderAgainstCandle(
 
   // 1. LIMIT BUY: If candle dipped to or below the limit price
   if (order.order_type === "LIMIT" && order.limit_price !== null) {
-    if (candle.low <= order.limit_price) {
-      const executionPrice = Math.min(order.limit_price, candle.open);
+    const isMatched =
+      order.side === "BUY"
+        ? candle.low <= order.limit_price
+        : candle.high >= order.limit_price;
+    if (isMatched) {
+      const executionPrice =
+        order.side === "BUY"
+          ? Math.min(order.limit_price, candle.open)
+          : Math.max(order.limit_price, candle.open);
       return {
         orderId: order.id,
         fillPrice: executionPrice,
@@ -55,7 +61,11 @@ export function evaluateOrderAgainstCandle(
     order.trigger_price !== null &&
     order.limit_price !== null
   ) {
-    if (candle.high >= order.trigger_price && candle.low <= order.limit_price) {
+    const isMatched =
+      order.side === "BUY"
+        ? candle.high >= order.trigger_price && candle.low <= order.limit_price
+        : candle.low <= order.trigger_price && candle.high >= order.limit_price;
+    if (isMatched) {
       return {
         orderId: order.id,
         fillPrice: order.limit_price,

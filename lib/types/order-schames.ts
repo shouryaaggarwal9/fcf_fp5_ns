@@ -3,6 +3,7 @@ import { z } from "zod";
 export const PlaceOrderSchema = z
   .object({
     symbol: z.string().min(1, "Symbol is required"),
+    side: z.enum(["BUY", "SELL"]),
     productType: z.enum(["CNC", "MIS"]),
     orderType: z.enum(["MARKET", "LIMIT", "STOP_LIMIT"]),
     quantity: z.number().int().positive("Quantity must be a positive integer"),
@@ -19,6 +20,11 @@ export const PlaceOrderSchema = z
     stopLossPrice: z
       .number()
       .positive("Stop loss price must be positive")
+      .optional()
+      .nullable(),
+    targetPrice: z
+      .number()
+      .positive("Target price must be positive")
       .optional()
       .nullable(),
     virtualTime: z
@@ -54,6 +60,29 @@ export const PlaceOrderSchema = z
           message: "Execution limit price is mandatory for STOP_LIMIT orders",
         });
       }
+    }
+
+    if (
+      data.side === "SELL" &&
+      (data.stopLossPrice != null || data.targetPrice != null)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["targetPrice"],
+        message: "Stop loss and target are only available on buy orders",
+      });
+    }
+
+    if (
+      data.side === "BUY" &&
+      data.stopLossPrice != null &&
+      data.stopLossPrice <= 0
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["stopLossPrice"],
+        message: "Target price must be positive",
+      });
     }
   });
 

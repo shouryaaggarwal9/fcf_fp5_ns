@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
+import { Square } from "lucide-react";
 import { Order, Position, Wallet } from "../../lib/types/database";
 import { StockQuote } from "../market-data/Watchlist";
 
@@ -9,6 +10,8 @@ interface PortfolioPanelProps {
   positions: Position[];
   orders: Order[];
   quotes: Record<string, StockQuote>;
+  onSquareOff: (position: Position, currentPrice: number) => Promise<void>;
+  onCancelOrder?: (orderId: string) => Promise<void>;
 }
 
 export const PortfolioPanel: React.FC<PortfolioPanelProps> = ({
@@ -16,25 +19,26 @@ export const PortfolioPanel: React.FC<PortfolioPanelProps> = ({
   positions,
   orders,
   quotes,
+  onSquareOff,
+  onCancelOrder,
 }) => {
   const [activeTab, setActiveTab] = useState<"positions" | "orders">(
     "positions",
   );
-
-  const openPositions = positions.filter((p) => p.quantity > 0);
-  const closedPositions = positions.filter(
-    (p) => p.quantity === 0 && Number(p.realized_pnl) !== 0,
+  const [closingPositionId, setClosingPositionId] = useState<string | null>(
+    null,
   );
+  const [squareOffError, setSquareOffError] = useState<string | null>(null);
 
-  let totalUnrealizedPnl = 0;
+  const openPositions = positions.filter((p) => Number(p.quantity) > 0);
+  const closedPositions = positions.filter((p) => Number(p.quantity) === 0);
+
   const openPositionsWithPnl = openPositions.map((pos) => {
     const currentPrice =
       quotes[pos.symbol]?.currentPrice ?? pos.average_buy_price;
     const pnl = (currentPrice - pos.average_buy_price) * pos.quantity;
     const pnlPercent =
       ((currentPrice - pos.average_buy_price) / pos.average_buy_price) * 100;
-    totalUnrealizedPnl += pnl;
-
     return {
       ...pos,
       currentPrice,
@@ -42,6 +46,10 @@ export const PortfolioPanel: React.FC<PortfolioPanelProps> = ({
       pnlPercent,
     };
   });
+  const totalUnrealizedPnl = openPositionsWithPnl.reduce(
+    (total, position) => total + position.pnl,
+    0,
+  );
 
   const totalRealizedPnl = positions.reduce(
     (acc, p) => acc + Number(p.realized_pnl || 0),
@@ -50,6 +58,23 @@ export const PortfolioPanel: React.FC<PortfolioPanelProps> = ({
   const cash = wallet ? Number(wallet.cash_balance) : 0;
   const margin = wallet ? Number(wallet.locked_margin) : 0;
   const totalAccountValue = cash + margin + totalUnrealizedPnl;
+
+  const handleSquareOff = async (position: Position, currentPrice: number) => {
+    setClosingPositionId(position.id);
+    setSquareOffError(null);
+
+    try {
+      await onSquareOff(position, currentPrice);
+    } catch (error) {
+      setSquareOffError(
+        error instanceof Error
+          ? error.message
+          : "Unable to square off position",
+      );
+    } finally {
+      setClosingPositionId(null);
+    }
+  };
 
   return (
     <div className="flex flex-col w-full bg-[#161b22] border border-[#21262d] rounded-lg overflow-hidden text-slate-200">
@@ -148,6 +173,7 @@ export const PortfolioPanel: React.FC<PortfolioPanelProps> = ({
                       <th className="pb-2 text-right">LTP</th>
                       <th className="pb-2 text-right">P&L (₹)</th>
                       <th className="pb-2 text-right">P&L (%)</th>
+                      <th className="pb-2 text-right">Action</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#21262d]/60 font-mono">
@@ -187,10 +213,29 @@ export const PortfolioPanel: React.FC<PortfolioPanelProps> = ({
                           {p.pnlPercent >= 0 ? "+" : ""}
                           {p.pnlPercent.toFixed(2)}%
                         </td>
+                        <td className="py-2.5 text-right">
+                          <button
+                            type="button"
+                            title={`Square off ${p.symbol}`}
+                            onClick={() => handleSquareOff(p, p.currentPrice)}
+                            disabled={closingPositionId === p.id}
+                            className="inline-flex items-center gap-1 rounded border border-rose-500/40 px-2 py-1 text-[10px] font-semibold text-rose-300 transition hover:bg-rose-500/10 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            <Square className="h-3 w-3" />
+                            {closingPositionId === p.id
+                              ? "Closing..."
+                              : "Square Off"}
+                          </button>
+                        </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
+              )}
+              {squareOffError && (
+                <div className="mt-2 text-xs text-rose-400">
+                  {squareOffError}
+                </div>
               )}
             </div>
 
@@ -198,7 +243,7 @@ export const PortfolioPanel: React.FC<PortfolioPanelProps> = ({
             {closedPositions.length > 0 && (
               <div>
                 <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-2">
-                  Closed Positions (Auto Squared-off / Exited)
+                  Closed Positions (Manual / Auto Exited)
                 </div>
                 <table className="w-full text-left border-collapse text-xs">
                   <thead>
@@ -261,6 +306,7 @@ export const PortfolioPanel: React.FC<PortfolioPanelProps> = ({
                 <th className="pb-2 text-right">Qty</th>
                 <th className="pb-2 text-right">Price</th>
                 <th className="pb-2 text-right">Status</th>
+                <th className="pb-2 text-right">Action</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#21262d]/60 font-mono">
@@ -284,7 +330,9 @@ export const PortfolioPanel: React.FC<PortfolioPanelProps> = ({
                     </span>
                   </td>
                   <td className="py-2.5 font-bold text-white">{o.symbol}</td>
-                  <td className="py-2.5 text-slate-300">{o.order_type}</td>
+                  <td className="py-2.5 text-slate-300">
+                    {o.order_type === "STOP_LIMIT" ? "SL-LMT" : o.order_type}
+                  </td>
                   <td className="py-2.5">
                     <span className="px-1.5 py-0.5 text-[10px] rounded bg-slate-800 text-slate-300">
                       {o.product_type}
@@ -292,24 +340,38 @@ export const PortfolioPanel: React.FC<PortfolioPanelProps> = ({
                   </td>
                   <td className="py-2.5 text-right">{o.quantity}</td>
                   <td className="py-2.5 text-right">
-                    {o.filled_price
+                    {o.status === "FILLED" && o.filled_price
                       ? `₹${Number(o.filled_price).toFixed(2)}`
-                      : o.limit_price
-                        ? `₹${Number(o.limit_price).toFixed(2)}`
-                        : "MKT"}
+                      : o.order_type === "STOP_LIMIT" && o.trigger_price
+                        ? `Trg: ₹${Number(o.trigger_price).toFixed(2)}`
+                        : o.limit_price
+                          ? `₹${Number(o.limit_price).toFixed(2)}`
+                          : "MKT"}
                   </td>
                   <td className="py-2.5 text-right">
                     <span
                       className={`px-2 py-0.5 text-[10px] font-bold rounded ${
                         o.status === "FILLED"
                           ? "bg-emerald-950 text-emerald-400 border border-emerald-800"
-                          : o.status === "PENDING"
-                            ? "bg-amber-950 text-amber-400 border border-amber-800"
-                            : "bg-rose-950 text-rose-400 border border-rose-800"
+                          : o.status === "CANCELLED" || o.status === "REJECTED"
+                            ? "bg-slate-800 text-slate-400 border border-slate-700"
+                            : "bg-amber-950 text-amber-400 border border-amber-800"
                       }`}
                     >
                       {o.status}
                     </span>
+                  </td>
+                  <td className="py-2.5 text-right">
+                    {(o.status === "PENDING" ||
+                      o.status === "TRIGGER_PENDING") && (
+                      <button
+                        type="button"
+                        onClick={() => onCancelOrder && onCancelOrder(o.id)}
+                        className="px-2 py-1 text-[10px] font-semibold rounded border border-rose-500/40 text-rose-300 hover:bg-rose-500/10 transition"
+                      >
+                        Cancel
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}
