@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { LogOut } from "lucide-react";
 import { createClient } from "../lib/supabase/client";
@@ -21,6 +21,10 @@ import { OrderForm } from "../features/trading-engine/OrderForm";
 import { PortfolioPanel } from "../features/portfolio/PortfolioPanel";
 import { VirtualClock } from "../features/market-data/VirtualClock";
 import { tradingService } from "../features/trading-engine/service";
+import {
+  getHistoricalSession,
+  getDeterministicCandle,
+} from "../features/market-data/engine";
 
 export default function TradingTerminalPage() {
   const router = useRouter();
@@ -33,8 +37,6 @@ export default function TradingTerminalPage() {
   const [virtualTime, setVirtualTime] = useState<string>(
     "2024-01-01T03:45:00.000Z",
   );
-  const [isPlaying, setIsPlaying] = useState<boolean>(false);
-  const [playbackSpeed, setPlaybackSpeed] = useState<number>(1);
 
   // Active Candle Intra-bar Tick State
   const [activeBar, setActiveBar] = useState<{
@@ -53,9 +55,6 @@ export default function TradingTerminalPage() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [userId, setUserId] = useState<string>("");
   const [userEmail, setUserEmail] = useState<string>("");
-
-  const virtualTimeRef = useRef(virtualTime);
-  virtualTimeRef.current = virtualTime;
 
   // 1. Session check
   useEffect(() => {
@@ -96,49 +95,17 @@ export default function TradingTerminalPage() {
     if (ordersRes.data) setOrders(ordersRes.data as Order[]);
   }, [userId, supabase]);
 
-  // 3. Load historical candles
-  const fetchCandles = useCallback(async () => {
-    const { data, error } = await supabase
-      .from("historical_candles")
-      .select("*")
-      .eq("symbol", selectedSymbol)
-      .eq("timeframe", timeframe)
-      .lte("timestamp", virtualTime)
-      .order("timestamp", { ascending: true })
-      .limit(100);
-
-    if (!error && data && data.length > 0) {
-      setCandles(data as HistoricalCandle[]);
-      const last = data[data.length - 1];
-      setActiveBar({
-        timestamp: last.timestamp,
-        open: Number(last.open),
-        high: Number(last.high),
-        low: Number(last.low),
-        close: Number(last.close),
-        volume: Number(last.volume),
-      });
-    }
-  }, [selectedSymbol, timeframe, virtualTime, supabase]);
-
-  // 4. Load Quotes
-  const fetchQuotes = useCallback(async () => {
+  // 3. Load deterministic quotes
+  const updateQuotes = useCallback(() => {
+    const now = new Date();
     const newQuotes: Record<string, StockQuote> = {};
 
     for (const symbol of SUPPORTED_SYMBOLS) {
-      const { data } = await supabase
-        .from("historical_candles")
-        .select("*")
-        .eq("symbol", symbol)
-        .eq("timeframe", "5m")
-        .lte("timestamp", virtualTime)
-        .order("timestamp", { ascending: false })
-        .limit(2);
-
       const meta = NSE_STOCKS[symbol];
-      if (data && data.length > 0) {
-        const latest = data[0];
-        const previous = data[1] || latest;
+      const history = getHistoricalSession(symbol, now, 2);
+      if (history.length > 0) {
+        const latest = history[history.length - 1];
+        const previous = history[history.length - 2] || latest;
         const change = latest.close - previous.close;
         const changePercent = (change / previous.close) * 100;
 
@@ -160,58 +127,63 @@ export default function TradingTerminalPage() {
       }
     }
     setQuotes(newQuotes);
-  }, [virtualTime, supabase]);
+  }, []);
 
+  // 1. Deterministic Chart Initialization & Offline Catch-Up
   useEffect(() => {
-    fetchCandles();
-    fetchQuotes();
-  }, [fetchCandles, fetchQuotes]);
+    if (!userId || !selectedSymbol) return;
 
-  useEffect(() => {
-    if (userId) {
-      fetchUserData();
+    async function initializeChart() {
+      const now = new Date();
+      const history = getHistoricalSession(selectedSymbol, now, 100);
+      setCandles(history);
+      updateQuotes();
+
+      if (history.length > 0) {
+        setActiveBar(history[history.length - 1]);
+        await tradingService.reconcilePendingOrders(userId, history);
+      }
+      await fetchUserData();
     }
-  }, [userId, fetchUserData]);
 
-  // 5. Second-by-Second Tick Engine (When Playing)
+    initializeChart();
+  }, [userId, selectedSymbol, fetchUserData, updateQuotes]);
+
+  // 2. Real-Time Live Sync & Micro-Ticking
   useEffect(() => {
-    if (!isPlaying) return;
+    if (!userId || candles.length === 0) return;
 
     const interval = setInterval(async () => {
-      const currentMs = new Date(virtualTimeRef.current).getTime();
-      // Step virtual clock forward by (1 second * playbackSpeed)
-      const nextDate = new Date(currentMs + 1000 * playbackSpeed);
-      const nextIso = nextDate.toISOString();
-      setVirtualTime(nextIso);
+      const now = new Date();
+      setVirtualTime(now.toISOString());
+      updateQuotes();
 
-      // Micro-tick price motion
       setActiveBar((prev) => {
         if (!prev) return null;
-        const delta = (Math.random() - 0.49) * 0.75;
-        const newClose = Math.round((prev.close + delta) * 100) / 100;
+
+        const current5mBoundary =
+          now.getTime() - (now.getTime() % (5 * 60 * 1000));
+        const prev5mBoundary = new Date(prev.timestamp).getTime();
+
+        if (current5mBoundary > prev5mBoundary) {
+          const newCandle = getDeterministicCandle(
+            selectedSymbol,
+            new Date(current5mBoundary),
+            "5m",
+          );
+          tradingService
+            .reconcilePendingOrders(userId, [newCandle])
+            .then(() => fetchUserData());
+          setCandles((current) => [...current, newCandle]);
+          return newCandle;
+        }
+
+        const volatility = prev.close * 0.0001;
+        const delta = (Math.random() - 0.5) * volatility;
+        const newClose = Math.round((prev.close + delta) * 20) / 20;
         const newHigh = Math.max(prev.high, newClose);
         const newLow = Math.min(prev.low, newClose);
-        const newVol = prev.volume + Math.floor(Math.random() * 15);
-
-        // Check active limit order triggers on tick
-        if (userId) {
-          const tickSyntheticCandle: HistoricalCandle = {
-            id: 0,
-            symbol: selectedSymbol,
-            timeframe: "5m",
-            timestamp: prev.timestamp,
-            open: prev.open,
-            high: newHigh,
-            low: newLow,
-            close: newClose,
-            volume: newVol,
-          };
-          tradingService
-            .reconcilePendingOrders(userId, [tickSyntheticCandle])
-            .then(() => {
-              fetchUserData();
-            });
-        }
+        const newVol = prev.volume + Math.floor(Math.random() * 5);
 
         return {
           ...prev,
@@ -221,31 +193,50 @@ export default function TradingTerminalPage() {
           volume: newVol,
         };
       });
+
+      const istMinutes = (now.getUTCMinutes() + 30) % 60;
+      const istSeconds = now.getUTCSeconds();
+      const istHours =
+        (now.getUTCHours() + 5 + Math.floor((now.getUTCMinutes() + 30) / 60)) %
+        24;
+      if (istHours === 15 && istMinutes === 15 && istSeconds === 0) {
+        const { data: misPositions } = await supabase
+          .from("positions")
+          .select("*")
+          .eq("user_id", userId)
+          .eq("product_type", "MIS")
+          .gt("quantity", 0);
+
+        if (misPositions && misPositions.length > 0) {
+          for (const pos of misPositions) {
+            const exitPrice =
+              getDeterministicCandle(
+                pos.symbol,
+                new Date(now.getTime() - (now.getTime() % (5 * 60 * 1000))),
+                "5m",
+              ).close || pos.average_buy_price;
+            await tradingService.squareOff(
+              userId,
+              pos.symbol,
+              "MIS",
+              exitPrice,
+              now.toISOString(),
+            );
+          }
+          await fetchUserData();
+        }
+      }
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [isPlaying, playbackSpeed, selectedSymbol, userId, fetchUserData]);
-
-  // Step 5 minutes manually (+5m button)
-  const stepForward5m = useCallback(async () => {
-    const nextDate = new Date(new Date(virtualTime).getTime() + 5 * 60 * 1000);
-    const nextTimeIso = nextDate.toISOString();
-    setVirtualTime(nextTimeIso);
-
-    const { data: newCandles } = await supabase
-      .from("historical_candles")
-      .select("*")
-      .eq("timeframe", "5m")
-      .eq("timestamp", nextTimeIso);
-
-    if (userId && newCandles && newCandles.length > 0) {
-      await tradingService.reconcilePendingOrders(
-        userId,
-        newCandles as HistoricalCandle[],
-      );
-      await fetchUserData();
-    }
-  }, [virtualTime, userId, supabase, fetchUserData]);
+  }, [
+    userId,
+    candles.length,
+    selectedSymbol,
+    supabase,
+    fetchUserData,
+    updateQuotes,
+  ]);
 
   const handleSignOut = async () => {
     await supabase.auth.signOut();
@@ -278,14 +269,7 @@ export default function TradingTerminalPage() {
         </div>
 
         <div className="w-auto">
-          <VirtualClock
-            currentVirtualTime={virtualTime}
-            isPlaying={isPlaying}
-            playbackSpeed={playbackSpeed}
-            onTogglePlay={() => setIsPlaying(!isPlaying)}
-            onStepForward={stepForward5m}
-            onSpeedChange={(speed) => setPlaybackSpeed(speed)}
-          />
+          <VirtualClock currentVirtualTime={virtualTime} />
         </div>
 
         <div className="flex items-center gap-3">

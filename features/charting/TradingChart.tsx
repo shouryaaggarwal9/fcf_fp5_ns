@@ -49,6 +49,17 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         background: { type: ColorType.Solid, color: "#0d1117" },
         textColor: "#8b949e",
       },
+      localization: {
+        locale: "en-IN",
+        timeFormatter: (timestamp: number) => {
+          return new Date(timestamp * 1000).toLocaleTimeString("en-IN", {
+            timeZone: "Asia/Kolkata",
+            hour: "2-digit",
+            minute: "2-digit",
+            hour12: false,
+          });
+        },
+      },
       grid: {
         vertLines: { color: "#161b22" },
         horzLines: { color: "#161b22" },
@@ -61,6 +72,14 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         borderColor: "#21262d",
         timeVisible: true,
         secondsVisible: true,
+        tickMarkFormatter: (time: number) => {
+          return new Date(time * 1000).toLocaleTimeString("en-IN", {
+            timeZone: "Asia/Kolkata",
+            hour: "2-digit",
+            minute: "2-digit",
+            hour12: false,
+          });
+        },
       },
       rightPriceScale: {
         borderColor: "#21262d",
