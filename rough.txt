@@ -1,3 +1,27 @@
+// 3. Zero-Bandwidth Local Execution Audit
+      if (capturedTick) {
+        const pending = ordersRef.current.filter((o) => o.status === "PENDING" || o.status === "TRIGGER_PENDING");
+        
+        if (pending.length > 0) {
+          let requiresDbSync = false;
+          
+          for (const order of pending) {
+            const match = evaluateOrderAgainstCandle(order, capturedTick);
+            if (match) {
+              try {
+                // Now this will correctly ping the DB and handle errors gracefully
+                await tradingService.executeFill(match.orderId, match.fillPrice, match.fillTime);
+                requiresDbSync = true;
+              } catch (error) {
+                console.error("Order Fill Error:", error);
+              }
+            }
+          }
+          
+          if (requiresDbSync) await fetchUserData();
+        }
+      }
+
 // Day-End Auto Square-off Check at precisely 23:45:00 IST
       const istHours = (now.getUTCHours() + 5 + Math.floor((now.getUTCMinutes() + 30) / 60)) % 24;
       const istMinutes = (now.getUTCMinutes() + 30) % 60;

@@ -40,16 +40,18 @@ export function useTradingEngine() {
   const [userId, setUserId] = useState<string>("");
   const [userEmail, setUserEmail] = useState<string>("");
 
-  // Refs for pure intervals
+  // Refs for pure intervals (prevents stale closures)
   const ordersRef = useRef<Order[]>([]);
   const symbolRef = useRef<string>("RELIANCE");
   const quotesRef = useRef<Record<string, StockQuote>>({});
+  const activeBarRef = useRef<HistoricalCandle | null>(null);
 
   useEffect(() => {
     ordersRef.current = orders;
     symbolRef.current = selectedSymbol;
     quotesRef.current = quotes;
-  }, [orders, selectedSymbol, quotes]);
+    activeBarRef.current = activeBar;
+  }, [orders, selectedSymbol, quotes, activeBar]);
 
   // Auth
   useEffect(() => {
@@ -133,75 +135,75 @@ export function useTradingEngine() {
       setVirtualTime(now.toISOString());
       updateQuotes();
 
-      let capturedTick: HistoricalCandle | null = null;
+      const prev = activeBarRef.current;
+      if (!prev) return;
+
+      const current5mBoundary =
+        now.getTime() - (now.getTime() % (5 * 60 * 1000));
+      const prev5mBoundary = new Date(prev.timestamp).getTime();
+
+      let newTick: HistoricalCandle;
       let isNewBoundary = false;
 
-      setActiveBar((prev) => {
-        if (!prev) return null;
-        const current5mBoundary =
-          now.getTime() - (now.getTime() % (5 * 60 * 1000));
-        const prev5mBoundary = new Date(prev.timestamp).getTime();
-
-        if (current5mBoundary > prev5mBoundary) {
-          const newCandle = getDeterministicCandle(
-            symbolRef.current,
-            new Date(current5mBoundary),
-            "5m",
-          );
-          capturedTick = newCandle;
-          isNewBoundary = true;
-          return newCandle;
-        }
-
+      // 1. Calculate the math SYNCHRONOUSLY outside of setState
+      if (current5mBoundary > prev5mBoundary) {
+        newTick = getDeterministicCandle(
+          symbolRef.current,
+          new Date(current5mBoundary),
+          "5m",
+        );
+        isNewBoundary = true;
+      } else {
         const delta = (Math.random() - 0.5) * (prev.close * 0.0001);
         const newClose = Math.round((prev.close + delta) * 20) / 20;
-        const updatedBar = {
+        newTick = {
           ...prev,
           high: Math.max(prev.high, newClose),
           low: Math.min(prev.low, newClose),
           close: newClose,
           volume: prev.volume + Math.floor(Math.random() * 5),
-        };
-
-        capturedTick = {
-          ...updatedBar,
           id: 0,
           symbol: symbolRef.current,
           timeframe: "5m",
         };
-        return updatedBar;
-      });
+      }
 
-      if (isNewBoundary && capturedTick) {
+      // 2. Commit to State
+      setActiveBar(newTick);
+      if (isNewBoundary) {
         setCandles((c) =>
-          c.some((x) => x.timestamp === capturedTick!.timestamp)
+          c.some((x) => x.timestamp === newTick.timestamp)
             ? c
-            : [...c, capturedTick!],
+            : [...c, newTick],
         );
       }
 
-      if (capturedTick) {
-        const pending = ordersRef.current.filter(
-          (o) => o.status === "PENDING" || o.status === "TRIGGER_PENDING",
-        );
-        if (pending.length > 0) {
-          let requiresDbSync = false;
-          for (const order of pending) {
-            const match = evaluateOrderAgainstCandle(order, capturedTick);
-            if (match) {
+      // 3. Evaluate local matches using the synchronously calculated tick
+      const pending = ordersRef.current.filter(
+        (o) => o.status === "PENDING" || o.status === "TRIGGER_PENDING",
+      );
+
+      if (pending.length > 0) {
+        let requiresDbSync = false;
+        for (const order of pending) {
+          const match = evaluateOrderAgainstCandle(order, newTick);
+          if (match) {
+            try {
               await tradingService.executeFill(
                 match.orderId,
                 match.fillPrice,
                 match.fillTime,
               );
               requiresDbSync = true;
+            } catch (error) {
+              console.error("Order Fill Error:", error);
             }
           }
-          if (requiresDbSync) await fetchUserData();
         }
+        if (requiresDbSync) await fetchUserData();
       }
 
-      // MIS Day-End Check
+      // 4. MIS Day-End Check
       const istHours =
         (now.getUTCHours() + 5 + Math.floor((now.getUTCMinutes() + 30) / 60)) %
         24;

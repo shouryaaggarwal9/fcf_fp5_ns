@@ -31,31 +31,45 @@ export function evaluateOrderAgainstCandle(
     return null;
   }
 
-  // Candle must be at or after order placement
-  if (new Date(candle.timestamp) < new Date(order.placed_at_virtual_time)) {
+  // FIX: Mid-Candle Time Paradox
+  // A candle's timestamp marks its START. We must allow matching if the order
+  // was placed at any point before the candle FINISHED.
+  const candleStartTime = new Date(candle.timestamp).getTime();
+  const candleEndTime = candleStartTime + 5 * 60 * 1000; // 5-minute duration
+  const orderTime = new Date(order.placed_at_virtual_time).getTime();
+
+  // Only ignore if the candle completely closed BEFORE the order was placed
+  if (candleEndTime <= orderTime) {
     return null;
   }
 
-  // 1. LIMIT BUY: If candle dipped to or below the limit price
+  const exactFillTime = new Date().toISOString();
+
+  // 1. LIMIT BUY / SELL (Target Exits)
   if (order.order_type === "LIMIT" && order.limit_price !== null) {
     const isMatched =
       order.side === "BUY"
         ? candle.low <= order.limit_price
         : candle.high >= order.limit_price;
+
     if (isMatched) {
-      const executionPrice =
-        order.side === "BUY"
-          ? Math.min(order.limit_price, candle.open)
-          : Math.max(order.limit_price, candle.open);
+      // If order placed mid-candle, execute exactly at the requested limit price
+      const fillPrice =
+        candleEndTime > orderTime && candleStartTime < orderTime
+          ? order.limit_price
+          : order.side === "BUY"
+            ? Math.min(order.limit_price, candle.open)
+            : Math.max(order.limit_price, candle.open);
+
       return {
         orderId: order.id,
-        fillPrice: executionPrice,
-        fillTime: candle.timestamp,
+        fillPrice: fillPrice,
+        fillTime: exactFillTime,
       };
     }
   }
 
-  // 2. STOP_LIMIT BUY: Trigger condition checked first
+  // 2. STOP_LIMIT BUY / SELL (Stop-Loss Exits)
   if (
     order.order_type === "STOP_LIMIT" &&
     order.trigger_price !== null &&
@@ -63,13 +77,14 @@ export function evaluateOrderAgainstCandle(
   ) {
     const isMatched =
       order.side === "BUY"
-        ? candle.high >= order.trigger_price && candle.low <= order.limit_price
-        : candle.low <= order.trigger_price && candle.high >= order.limit_price;
+        ? candle.high >= order.trigger_price
+        : candle.low <= order.trigger_price;
+
     if (isMatched) {
       return {
         orderId: order.id,
         fillPrice: order.limit_price,
-        fillTime: candle.timestamp,
+        fillTime: exactFillTime,
       };
     }
   }
@@ -88,11 +103,10 @@ export function evaluateGttAgainstCandle(
     return null;
   }
 
-  // Buy GTT triggers if price dips to or below trigger price
   if (candle.low <= gtt.trigger_price) {
     return {
       gttId: gtt.id,
-      triggerTime: candle.timestamp,
+      triggerTime: new Date().toISOString(),
       limitPrice: gtt.limit_price,
       symbol: gtt.symbol,
       productType: gtt.product_type,
