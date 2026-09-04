@@ -1,3 +1,16 @@
+async executeFill(orderId: string, fillPrice: number, fillTime: string) {
+    const { error } = await this.supabase.rpc("execute_order_fill", {
+      p_order_id: orderId,
+      p_fill_price: fillPrice, // Removed the 'ed'
+      p_fill_time: fillTime,   // Removed the 'ed'
+    });
+    
+    if (error) {
+      throw new Error(`Execution Failed: ${error.message}`);
+    }
+  }
+
+
 // 3. Zero-Bandwidth Local Execution Audit
       if (capturedTick) {
         const pending = ordersRef.current.filter((o) => o.status === "PENDING" || o.status === "TRIGGER_PENDING");

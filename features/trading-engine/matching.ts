@@ -26,40 +26,43 @@ export function evaluateOrderAgainstCandle(
     return null;
   }
 
-  // Symbol must match
   if (order.symbol !== candle.symbol) {
     return null;
   }
 
-  // FIX: Mid-Candle Time Paradox
-  // A candle's timestamp marks its START. We must allow matching if the order
-  // was placed at any point before the candle FINISHED.
   const candleStartTime = new Date(candle.timestamp).getTime();
   const candleEndTime = candleStartTime + 5 * 60 * 1000; // 5-minute duration
   const orderTime = new Date(order.placed_at_virtual_time).getTime();
 
-  // Only ignore if the candle completely closed BEFORE the order was placed
+  // 1. Ignore if the candle completely closed BEFORE the order was placed
   if (candleEndTime <= orderTime) {
     return null;
   }
 
   const exactFillTime = new Date().toISOString();
 
-  // 1. LIMIT BUY / SELL (Target Exits)
+  // 2. Intra-Candle Taint Protection
+  // If the order was placed during this active candle, the candle's High/Low
+  // includes price action from BEFORE the order existed. We must evaluate
+  // strictly against the instantaneous live tick (candle.close).
+  const isMidCandle = orderTime > candleStartTime;
+  const evalHigh = isMidCandle ? candle.close : candle.high;
+  const evalLow = isMidCandle ? candle.close : candle.low;
+
+  // 3. LIMIT BUY / SELL (Target Exits)
   if (order.order_type === "LIMIT" && order.limit_price !== null) {
     const isMatched =
       order.side === "BUY"
-        ? candle.low <= order.limit_price
-        : candle.high >= order.limit_price;
+        ? evalLow <= order.limit_price
+        : evalHigh >= order.limit_price;
 
     if (isMatched) {
-      // If order placed mid-candle, execute exactly at the requested limit price
-      const fillPrice =
-        candleEndTime > orderTime && candleStartTime < orderTime
-          ? order.limit_price
-          : order.side === "BUY"
-            ? Math.min(order.limit_price, candle.open)
-            : Math.max(order.limit_price, candle.open);
+      // Execute exactly at the requested limit price to prevent slippage on targets
+      const fillPrice = isMidCandle
+        ? order.limit_price
+        : order.side === "BUY"
+          ? Math.min(order.limit_price, candle.open)
+          : Math.max(order.limit_price, candle.open);
 
       return {
         orderId: order.id,
@@ -69,21 +72,18 @@ export function evaluateOrderAgainstCandle(
     }
   }
 
-  // 2. STOP_LIMIT BUY / SELL (Stop-Loss Exits)
-  if (
-    order.order_type === "STOP_LIMIT" &&
-    order.trigger_price !== null &&
-    order.limit_price !== null
-  ) {
+  // 4. STOP_LIMIT BUY / SELL (Stop-Loss Exits)
+  if (order.order_type === "STOP_LIMIT" && order.trigger_price !== null) {
     const isMatched =
       order.side === "BUY"
-        ? candle.high >= order.trigger_price
-        : candle.low <= order.trigger_price;
+        ? evalHigh >= order.trigger_price
+        : evalLow <= order.trigger_price;
 
     if (isMatched) {
       return {
         orderId: order.id,
-        fillPrice: order.limit_price,
+        // Fallback to trigger price if limit is null (Stop-Market behavior)
+        fillPrice: order.limit_price ?? order.trigger_price,
         fillTime: exactFillTime,
       };
     }
@@ -103,7 +103,9 @@ export function evaluateGttAgainstCandle(
     return null;
   }
 
-  if (candle.low <= gtt.trigger_price) {
+  const evalLow = candle.low; // GTTs are evaluated statically against historical catchup
+
+  if (evalLow <= gtt.trigger_price) {
     return {
       gttId: gtt.id,
       triggerTime: new Date().toISOString(),

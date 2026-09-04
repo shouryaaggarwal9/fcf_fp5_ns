@@ -25,7 +25,6 @@ export function useTradingEngine() {
   const router = useRouter();
   const supabase = createClient();
 
-  // State
   const [selectedSymbol, setSelectedSymbol] = useState<string>("RELIANCE");
   const [timeframe, setTimeframe] = useState<TimeFrame>("5m");
   const [virtualTime, setVirtualTime] = useState<string>(
@@ -40,11 +39,14 @@ export function useTradingEngine() {
   const [userId, setUserId] = useState<string>("");
   const [userEmail, setUserEmail] = useState<string>("");
 
-  // Refs for pure intervals (prevents stale closures)
+  // Refs for pure intervals
   const ordersRef = useRef<Order[]>([]);
   const symbolRef = useRef<string>("RELIANCE");
   const quotesRef = useRef<Record<string, StockQuote>>({});
   const activeBarRef = useRef<HistoricalCandle | null>(null);
+
+  // FIX: Concurrency Lock to prevent database DDOS & race conditions
+  const processingOrdersRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     ordersRef.current = orders;
@@ -53,7 +55,6 @@ export function useTradingEngine() {
     activeBarRef.current = activeBar;
   }, [orders, selectedSymbol, quotes, activeBar]);
 
-  // Auth
   useEffect(() => {
     async function loadUser() {
       const {
@@ -70,7 +71,6 @@ export function useTradingEngine() {
     loadUser();
   }, [supabase, router]);
 
-  // Fetch Ledger
   const fetchUserData = useCallback(async () => {
     if (!userId) return;
     const [walletRes, positionsRes, ordersRes] = await Promise.all([
@@ -87,7 +87,6 @@ export function useTradingEngine() {
     if (ordersRes.data) setOrders(ordersRes.data as Order[]);
   }, [userId, supabase]);
 
-  // Quotes Update
   const updateQuotes = useCallback(() => {
     const now = new Date();
     const newQuotes: Record<string, StockQuote> = {};
@@ -110,7 +109,6 @@ export function useTradingEngine() {
     setQuotes(newQuotes);
   }, []);
 
-  // Initialization
   useEffect(() => {
     if (!userId || !selectedSymbol) return;
     async function initializeChart() {
@@ -145,7 +143,6 @@ export function useTradingEngine() {
       let newTick: HistoricalCandle;
       let isNewBoundary = false;
 
-      // 1. Calculate the math SYNCHRONOUSLY outside of setState
       if (current5mBoundary > prev5mBoundary) {
         newTick = getDeterministicCandle(
           symbolRef.current,
@@ -158,8 +155,8 @@ export function useTradingEngine() {
         const newClose = Math.round((prev.close + delta) * 20) / 20;
         newTick = {
           ...prev,
-          high: Math.max(prev.high, newClose),
-          low: Math.min(prev.low, newClose),
+          high: Math.max(Number(prev.high), newClose),
+          low: Math.min(Number(prev.low), newClose),
           close: newClose,
           volume: prev.volume + Math.floor(Math.random() * 5),
           id: 0,
@@ -168,7 +165,6 @@ export function useTradingEngine() {
         };
       }
 
-      // 2. Commit to State
       setActiveBar(newTick);
       if (isNewBoundary) {
         setCandles((c) =>
@@ -178,32 +174,48 @@ export function useTradingEngine() {
         );
       }
 
-      // 3. Evaluate local matches using the synchronously calculated tick
+      // FIX: Filter out orders that are currently waiting for DB response
       const pending = ordersRef.current.filter(
-        (o) => o.status === "PENDING" || o.status === "TRIGGER_PENDING",
+        (o) =>
+          (o.status === "PENDING" || o.status === "TRIGGER_PENDING") &&
+          !processingOrdersRef.current.has(o.id),
       );
 
       if (pending.length > 0) {
-        let requiresDbSync = false;
         for (const order of pending) {
           const match = evaluateOrderAgainstCandle(order, newTick);
           if (match) {
-            try {
-              await tradingService.executeFill(
-                match.orderId,
-                match.fillPrice,
-                match.fillTime,
-              );
-              requiresDbSync = true;
-            } catch (error) {
-              console.error("Order Fill Error:", error);
-            }
+            // 1. Instantly lock the order locally to prevent double-firing
+            processingOrdersRef.current.add(order.id);
+            console.log(
+              `[Engine] Match found! Sending Order ${order.id} to DB...`,
+              match,
+            );
+
+            // 2. Fire and forget to avoid blocking the tick loop
+            tradingService
+              .executeFill(match.orderId, match.fillPrice, match.fillTime)
+              .then(() => {
+                console.log(
+                  `[Engine] Database successfully filled Order ${order.id}.`,
+                );
+                fetchUserData();
+                // We purposefully leave it in processingOrdersRef until fetchUserData completes
+                // so it doesn't get re-evaluated.
+              })
+              .catch((err) => {
+                console.error(
+                  `[Engine] Database REJECTED execution for Order ${order.id}:`,
+                  err,
+                );
+                // Unlock only if it failed, so it can try again
+                processingOrdersRef.current.delete(order.id);
+              });
           }
         }
-        if (requiresDbSync) await fetchUserData();
       }
 
-      // 4. MIS Day-End Check
+      // MIS Day-End Check
       const istHours =
         (now.getUTCHours() + 5 + Math.floor((now.getUTCMinutes() + 30) / 60)) %
         24;
@@ -218,6 +230,7 @@ export function useTradingEngine() {
           .eq("user_id", userId)
           .eq("product_type", "MIS")
           .gt("quantity", 0);
+
         if (data && data.length > 0) {
           for (const pos of data as Position[]) {
             const exitPrice =
@@ -238,7 +251,6 @@ export function useTradingEngine() {
     return () => clearInterval(interval);
   }, [userId, candles.length > 0, supabase, fetchUserData, updateQuotes]);
 
-  // Actions
   const handleSignOut = async () => {
     await supabase.auth.signOut();
     router.push("/login");
